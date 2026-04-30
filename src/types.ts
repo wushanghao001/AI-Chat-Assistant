@@ -39,7 +39,7 @@ export interface StreamChunk {
   object: string;
   created: number;
   model: string;
-  choices: Array<{
+  choices?: Array<{
     index: number;
     delta: {
       role?: 'assistant';
@@ -47,4 +47,8 @@ export interface StreamChunk {
     };
     finish_reason: string | null;
   }>;
+  // 错误相关属性
+  code?: number;
+  success?: boolean;
+  msg?: string;
 }

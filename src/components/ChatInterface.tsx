@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type MouseEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -19,7 +19,6 @@ export function ChatInterface() {
   const [isLoading, setIsLoading] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [editingMessage, setEditingMessage] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isPausedRef = useRef<boolean>(false);
@@ -132,8 +131,11 @@ export function ChatInterface() {
   };
 
   // 发送消息
-  const handleSend = async (messageContent?: string) => {
-    const content = messageContent || input.trim();
+  const handleSend = async (messageContent?: string | MouseEvent) => {
+    // 如果是 MouseEvent，忽略它
+    const content = (messageContent instanceof MouseEvent || typeof messageContent !== 'string') 
+      ? input.trim() 
+      : messageContent;
     if (!content || isLoading) return;
 
     // 如果没有当前对话，创建一个新对话
@@ -155,7 +157,6 @@ export function ChatInterface() {
     setIsLoading(true);
     setIsPaused(false);
     setError(null);
-    setEditingMessage(null);
 
     try {
       // 2. 构建消息历史（包含历史消息，实现多轮对话）
@@ -293,7 +294,6 @@ export function ChatInterface() {
     if (isLoading) {
       handlePause();
     }
-    setEditingMessage(message.content);
     setInput(message.content);
     // 移除消息和对应的助手回复
     setMessages(prev => {
