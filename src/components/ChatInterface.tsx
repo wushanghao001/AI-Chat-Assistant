@@ -3,15 +3,22 @@ import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { Message } from '../types';
-import { zhiPuAI } from '../api';
+import type { User } from '../types/user';
+import { zhiPuAI, AVAILABLE_MODELS, type ModelId } from '../api';
 
 interface Conversation {
   id: string;
   title: string;
   timestamp: number;
+  model: ModelId;
 }
 
-export function ChatInterface() {
+interface ChatInterfaceProps {
+  user: User;
+  onLogout: () => void;
+}
+
+export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string>('');
   const [messages, setMessages] = useState<Message[]>([]);
@@ -19,6 +26,8 @@ export function ChatInterface() {
   const [isLoading, setIsLoading] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState<ModelId>('glm-4');
+  const [showModelDropdown, setShowModelDropdown] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isPausedRef = useRef<boolean>(false);
@@ -40,21 +49,27 @@ export function ChatInterface() {
     isPausedRef.current = isPaused;
   }, [isPaused]);
 
-  // 加载当前对话的消息
+  // 加载当前对话的消息（只在首次选择对话时加载）
   useEffect(() => {
     if (currentConversationId) {
       const savedMessages = localStorage.getItem(`messages_${currentConversationId}`);
       if (savedMessages) {
         try {
-          setMessages(JSON.parse(savedMessages));
+          const parsedMessages = JSON.parse(savedMessages);
+          // 只有当当前消息列表为空时才加载保存的消息
+          // 避免覆盖刚添加的用户消息
+          setMessages(prev => prev.length === 0 ? parsedMessages : prev);
         } catch (e) {
           console.error('Failed to load messages:', e);
         }
-      } else {
-        setMessages([]);
+      }
+      // 加载对话使用的模型
+      const conversation = conversations.find(c => c.id === currentConversationId);
+      if (conversation) {
+        setSelectedModel(conversation.model);
       }
     }
-  }, [currentConversationId]);
+  }, [currentConversationId, conversations]);
 
   // 保存对话列表
   useEffect(() => {
@@ -76,17 +91,19 @@ export function ChatInterface() {
   }, [messages]);
 
   // 创建新对话
-  const createNewConversation = () => {
+  const createNewConversation = (): string => {
     const newId = Date.now().toString();
     const newConversation: Conversation = {
       id: newId,
       title: '新对话',
       timestamp: Date.now(),
+      model: selectedModel,
     };
     setConversations(prev => [newConversation, ...prev]);
     setCurrentConversationId(newId);
-    setMessages([]);
+    // 不在这里清空消息列表，让调用者处理
     setError(null);
+    return newId;
   };
 
   // 选择对话
@@ -138,9 +155,10 @@ export function ChatInterface() {
       : messageContent;
     if (!content || isLoading) return;
 
-    // 如果没有当前对话，创建一个新对话
-    if (!currentConversationId) {
-      createNewConversation();
+    // 如果没有当前对话，创建一个新对话并获取新ID
+    let conversationId = currentConversationId;
+    if (!conversationId) {
+      conversationId = createNewConversation();
     }
 
     const userMessage: Message = {
@@ -159,6 +177,10 @@ export function ChatInterface() {
     setError(null);
 
     try {
+      // 获取当前日期
+      const currentDate = new Date();
+      const dateString = `${currentDate.getFullYear()}年${currentDate.getMonth() + 1}月${currentDate.getDate()}日`;
+      
       // 2. 构建消息历史（包含历史消息，实现多轮对话）
       let messageHistory;
       if (messageContent) {
@@ -180,6 +202,14 @@ export function ChatInterface() {
           content: userMessage.content,
         }]);
       }
+      
+      // 在第一条用户消息前添加日期提示
+      if (messageHistory.length > 0 && messageHistory[0].role === 'user') {
+        messageHistory[0] = {
+          role: 'user' as const,
+          content: `当前日期是${dateString}。\n\n${messageHistory[0].content}`
+        };
+      }
 
       // 创建助手消息占位符
       let assistantMessage: Message = {
@@ -191,7 +221,6 @@ export function ChatInterface() {
       setMessages(prev => [...prev, assistantMessage]);
 
       // 3. 调用 API 获取 AI 回答，使用流式输出
-      console.log('调用 API，消息历史:', messageHistory);
       
       // 创建 AbortController 用于中止请求
       const abortController = new AbortController();
@@ -216,35 +245,61 @@ export function ChatInterface() {
               return;
             }
             
-            const delta = chunk.choices?.[0]?.delta?.content || '';
-            console.log('解析出的内容:', delta);
+            // 提取流式数据中的内容
+            let delta = '';
+            const chunkAny = chunk as any;
+            
+            console.log('=== 流式数据解析 ===');
+            console.log('原始chunk:', JSON.stringify(chunk, null, 2));
+            console.log('chunk.choices:', chunk.choices);
+            
+            // 尝试多种方式提取内容，适配不同的 API 响应格式
+            if (chunk.choices && chunk.choices.length > 0) {
+              delta = chunk.choices[0]?.delta?.content || '';
+              console.log('方式1 - delta:', delta);
+            }
+            if (!delta && chunkAny.choices && chunkAny.choices.length > 0) {
+              delta = chunkAny.choices[0]?.message?.content || '';
+              console.log('方式2 - message.content:', delta);
+            }
+            if (!delta) {
+              delta = chunkAny.content || chunkAny.text || chunkAny.response || '';
+              console.log('方式3 - 其他字段:', delta);
+            }
+            
+            console.log('最终delta:', delta);
+            
             if (delta) {
               // 4. 逐字显示 AI 的回答
               setMessages(prev => {
                 const newMessages = [...prev];
-                const lastMessage = newMessages[newMessages.length - 1];
-                if (lastMessage && lastMessage.role === 'assistant') {
-                  // 避免重复添加相同的内容
-                  // 1. 检查是否已经包含相同的内容
-                  if (!lastMessage.content.includes(delta)) {
-                    // 2. 检查是否是重复的短语（如"中关村中关村"）
-                    const newContent = lastMessage.content + delta;
-                    const words = newContent.split(' ');
-                    const hasDuplicateWords = words.some((word, index) => {
-                      return index > 0 && word === words[index - 1];
-                    });
-                    
-                    if (!hasDuplicateWords) {
-                      lastMessage.content += delta;
-                      console.log('更新后的助手消息:', lastMessage.content);
-                    }
-                  }
+                let lastIndex = newMessages.length - 1;
+                let lastMessage = newMessages[lastIndex];
+                
+                // 如果消息列表为空或最后一条消息不是助手消息，创建助手消息占位符
+                if (!lastMessage || lastMessage.role !== 'assistant') {
+                  const assistantMessage = {
+                    role: 'assistant' as const,
+                    content: '',
+                    timestamp: Date.now(),
+                  };
+                  newMessages.push(assistantMessage);
+                  lastIndex = newMessages.length - 1;
+                  lastMessage = assistantMessage;
                 }
+                
+                // 更新助手消息内容
+                const updatedMessage = {
+                  ...lastMessage,
+                  content: lastMessage.content + delta
+                };
+                newMessages[lastIndex] = updatedMessage;
                 return newMessages;
               });
             }
           },
           0.7,
+          selectedModel,
           abortController.signal
         );
       } catch (e) {
@@ -262,8 +317,8 @@ export function ChatInterface() {
         const contentStr = String(userMessage.content);
         setConversations(prev =>
           prev.map(c =>
-            c.id === currentConversationId
-              ? { ...c, title: contentStr.slice(0, 20) + (contentStr.length > 20 ? '...' : '') }
+            c.id === conversationId
+              ? { ...c, title: contentStr.slice(0, 20) + (contentStr.length > 20 ? '...' : ''), model: selectedModel }
               : c
           )
         );
@@ -340,6 +395,9 @@ export function ChatInterface() {
     return groups;
   };
 
+  // 获取当前选中模型的名称
+  const currentModelName = AVAILABLE_MODELS.find(m => m.id === selectedModel)?.name || 'GLM-4';
+
   return (
     <div className="flex h-screen bg-white overflow-hidden">
       {/* 左侧边栏 */}
@@ -372,27 +430,33 @@ export function ChatInterface() {
             convs.length > 0 && (
               <div key={groupName} className="mb-4">
                 <div className="px-3 py-2 text-xs text-gray-400 font-medium">{groupName}</div>
-                {convs.map(conv => (
-                  <div
-                    key={conv.id}
-                    onClick={() => selectConversation(conv.id)}
-                    className={`group flex items-center justify-between px-3 py-2.5 rounded-lg cursor-pointer text-sm mb-1 ${
-                      currentConversationId === conv.id
-                        ? 'bg-gray-200 text-gray-900'
-                        : 'text-gray-700 hover:bg-gray-100'
-                    }`}
-                  >
-                    <span className="truncate flex-1">{conv.title}</span>
-                    <button
-                      onClick={(e) => deleteConversation(conv.id, e)}
-                      className="opacity-0 group-hover:opacity-100 p-1 hover:bg-gray-300 rounded transition-opacity"
+                {convs.map(conv => {
+                  const model = AVAILABLE_MODELS.find(m => m.id === conv.model);
+                  return (
+                    <div
+                      key={conv.id}
+                      onClick={() => selectConversation(conv.id)}
+                      className={`group flex items-center justify-between px-3 py-2.5 rounded-lg cursor-pointer text-sm mb-1 ${
+                        currentConversationId === conv.id
+                          ? 'bg-gray-200 text-gray-900'
+                          : 'text-gray-700 hover:bg-gray-100'
+                      }`}
                     >
-                      <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </div>
-                ))}
+                      <div className="flex-1 truncate">
+                        <span className="block truncate">{conv.title}</span>
+                        <span className="text-xs text-gray-400">{model?.name}</span>
+                      </div>
+                      <button
+                        onClick={(e) => deleteConversation(conv.id, e)}
+                        className="opacity-0 group-hover:opacity-100 p-1 hover:bg-gray-300 rounded transition-opacity"
+                      >
+                        <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )
           ))}
@@ -400,11 +464,25 @@ export function ChatInterface() {
 
         {/* 底部用户信息 */}
         <div className="p-4 border-t border-gray-200">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-gray-800 rounded-full flex items-center justify-center text-white text-sm font-medium">
-              吴
+          <div className="flex items-center gap-3 cursor-pointer hover:bg-gray-50 rounded-lg p-1 -m-1" onClick={onLogout}>
+            {user.avatar ? (
+              <img
+                src={user.avatar}
+                alt={user.username}
+                className="w-8 h-8 rounded-full object-cover"
+              />
+            ) : (
+              <div className="w-8 h-8 bg-gray-800 rounded-full flex items-center justify-center text-white text-sm font-medium">
+                {user.username.charAt(0)}
+              </div>
+            )}
+            <div className="flex-1 min-w-0">
+              <span className="text-sm text-gray-700 font-medium truncate">{user.username}</span>
+              <span className="text-xs text-gray-400 block">点击退出</span>
             </div>
-            <span className="text-sm text-gray-700 font-medium">吴尚浩</span>
+            <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
           </div>
         </div>
       </div>
@@ -413,11 +491,44 @@ export function ChatInterface() {
       <div className="flex-1 flex flex-col min-w-0">
         {/* 顶部标题栏 */}
         <div className="h-14 border-b border-gray-200 flex items-center justify-center px-6 flex-shrink-0">
-          <div className="flex items-center gap-2 text-sm font-medium text-gray-700 cursor-pointer hover:text-gray-900">
-            <span>CodeMaster-V4</span>
-            <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
+          <div className="relative">
+            <button
+              onClick={() => setShowModelDropdown(!showModelDropdown)}
+              className="flex items-center gap-2 text-sm font-medium text-gray-700 cursor-pointer hover:text-gray-900 px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors"
+            >
+              <span>{currentModelName}</span>
+              <svg className={`w-4 h-4 text-gray-400 transition-transform ${showModelDropdown ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+
+            {/* 模型选择下拉菜单 */}
+            {showModelDropdown && (
+              <div className="absolute top-full left-0 mt-1 w-56 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-10">
+                {AVAILABLE_MODELS.map((model) => (
+                  <button
+                    key={model.id}
+                    onClick={() => {
+                      setSelectedModel(model.id);
+                      setShowModelDropdown(false);
+                    }}
+                    className={`w-full text-left px-4 py-2.5 text-sm hover:bg-gray-50 transition-colors flex items-center justify-between ${
+                      selectedModel === model.id ? 'bg-gray-50 text-gray-900' : 'text-gray-700'
+                    }`}
+                  >
+                    <div>
+                      <div className="font-medium">{model.name}</div>
+                      <div className="text-xs text-gray-500">{model.description}</div>
+                    </div>
+                    {selectedModel === model.id && (
+                      <svg className="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                      </svg>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -437,9 +548,17 @@ export function ChatInterface() {
                   {/* 头像 */}
                   <div className="flex-shrink-0">
                     {message.role === 'user' ? (
-                      <div className="w-8 h-8 bg-gray-800 rounded-full flex items-center justify-center text-white text-sm font-medium">
-                        吴
-                      </div>
+                      user.avatar ? (
+                        <img
+                          src={user.avatar}
+                          alt={user.username}
+                          className="w-8 h-8 rounded-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-8 h-8 bg-gray-800 rounded-full flex items-center justify-center text-white text-sm font-medium">
+                          {user.username.charAt(0)}
+                        </div>
+                      )
                     ) : (
                       <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white text-sm font-medium">
                         AI
@@ -507,63 +626,91 @@ export function ChatInterface() {
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-1">
                       <span className="text-sm font-medium text-gray-900">AI</span>
-                    </div>
-                    <div className="flex items-center gap-2 text-gray-500 text-sm">
-                      <div className="flex space-x-1">
-                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
-                      </div>
-                      <span>思考中...</span>
                       <button
                         onClick={handlePause}
-                        className="text-xs text-blue-500 hover:text-blue-700 transition-colors ml-2"
+                        className="text-xs text-red-500 hover:text-red-700 transition-colors px-2 py-0.5 bg-red-50 rounded"
                       >
                         暂停思考
                       </button>
+                    </div>
+                    <div className="flex items-center gap-2 text-gray-500 text-sm">
+                      <span>思考中</span>
+                      <span className="flex gap-1">
+                        <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
+                        <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
+                        <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
+                      </span>
                     </div>
                   </div>
                 </div>
               )}
 
-              {/* 错误提示 */}
-              {error && (
-                <div className="bg-red-50 text-red-700 p-3 rounded-lg">
-                  {error}
+              {/* 暂停状态 */}
+              {isPaused && messages.length > 0 && messages[messages.length - 1].role === 'assistant' && (
+                <div className="flex gap-4">
+                  <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white text-sm font-medium">
+                    AI
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-gray-500 text-sm">
+                      <span className="inline-block px-2 py-1 bg-yellow-50 text-yellow-700 rounded text-xs mr-2">已暂停</span>
+                      可以修改问题后重新发送
+                    </div>
+                  </div>
                 </div>
               )}
 
               <div ref={chatEndRef} />
             </div>
           )}
+
+          {/* 错误提示 */}
+          {error && (
+            <div className="max-w-3xl mx-auto mt-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+              <div className="flex items-start gap-3">
+                <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                </svg>
+                <div className="text-sm whitespace-pre-line">{error}</div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 底部输入区域 */}
-        <div className="border-t border-gray-200 p-4 flex-shrink-0">
+        <div className="p-4 border-t border-gray-200 flex-shrink-0">
           <div className="max-w-3xl mx-auto">
-            <div className="relative">
-              <input
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && handleSend()}
-                disabled={isLoading}
-                placeholder={isLoading ? "思考中..." : "给 AI 发送消息..."}
-                className="w-full border border-gray-200 rounded-lg px-4 py-3 pr-12 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-50 disabled:text-gray-400"
-              />
+            <div className="flex items-end gap-3">
+              <div className="flex-1 relative">
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  disabled={isLoading}
+                  placeholder={isLoading ? 'AI 正在思考...' : '给 AI 发消息...'}
+                  className="w-full px-4 py-3 pr-12 border border-gray-200 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed"
+                  rows={2}
+                />
+                <div className="absolute right-3 bottom-3 text-xs text-gray-400">
+                  Shift + Enter 换行
+                </div>
+              </div>
               <button
                 onClick={handleSend}
-                disabled={isLoading || !input.trim()}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-gray-800 text-white rounded-lg hover:bg-gray-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+                disabled={!input.trim() || isLoading}
+                className="px-6 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
                 </svg>
+                发送
               </button>
             </div>
-            <p className="text-center text-xs text-gray-400 mt-2">
-              AI 生成的内容可能不准确，请核实重要信息。
-            </p>
           </div>
         </div>
       </div>

@@ -1,5 +1,15 @@
 import type { ChatRequest, StreamChunk } from './types';
 
+// 智谱可用模型列表
+export const AVAILABLE_MODELS = [
+  { id: 'glm-4', name: 'GLM-4', description: '最新一代大模型，支持复杂推理' },
+  { id: 'glm-4v', name: 'GLM-4V', description: '支持图像理解的多模态模型' },
+  { id: 'glm-3-turbo', name: 'GLM-3 Turbo', description: '高性能低成本模型' },
+  { id: 'chatglm3-6b', name: 'ChatGLM3-6B', description: '开源可部署模型' },
+] as const;
+
+export type ModelId = typeof AVAILABLE_MODELS[number]['id'];
+
 export class ZhiPuAI {
   private apiKey: string;
   private baseUrl: string;
@@ -17,6 +27,7 @@ export class ZhiPuAI {
     messages: Array<{ role: 'user' | 'assistant'; content: string }>,
     onChunk: (chunk: StreamChunk) => void,
     temperature: number = 0.7,
+    model: ModelId = 'glm-4',
     abortSignal?: AbortSignal
   ): Promise<void> {
     // 确保 messages 数组中不包含循环引用
@@ -26,7 +37,7 @@ export class ZhiPuAI {
     }));
 
     const requestBody: ChatRequest = {
-      model: 'glm-4', // ✅ 修复：模型名正确
+      model,
       messages: safeMessages,
       stream: true,
       temperature,
@@ -79,7 +90,8 @@ export class ZhiPuAI {
 
   async chat(
     messages: Array<{ role: 'user' | 'assistant'; content: string }>,
-    temperature: number = 0.7
+    temperature: number = 0.7,
+    model: ModelId = 'glm-4'
   ): Promise<any> {
     // 确保 messages 数组中不包含循环引用
     const safeMessages = messages.map(msg => ({
@@ -88,7 +100,7 @@ export class ZhiPuAI {
     }));
 
     const requestBody: ChatRequest = {
-      model: 'glm-4', // ✅ 修复
+      model,
       messages: safeMessages,
       stream: false,
       temperature,
