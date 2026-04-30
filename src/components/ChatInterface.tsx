@@ -464,25 +464,26 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
 
         {/* 底部用户信息 */}
         <div className="p-4 border-t border-gray-200">
-          <div className="flex items-center gap-3 cursor-pointer hover:bg-gray-50 rounded-lg p-1 -m-1" onClick={onLogout}>
-            {user.avatar ? (
-              <img
-                src={user.avatar}
-                alt={user.username}
-                className="w-8 h-8 rounded-full object-cover"
-              />
-            ) : (
-              <div className="w-8 h-8 bg-gray-800 rounded-full flex items-center justify-center text-white text-sm font-medium">
-                {user.username.charAt(0)}
-              </div>
-            )}
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-gray-800 rounded-full flex items-center justify-center text-white text-sm font-medium">
+              {user.avatar ? (
+                <img
+                  src={user.avatar}
+                  alt={user.username}
+                  className="w-full h-full rounded-full object-cover"
+                />
+              ) : (
+                user.username.charAt(0)
+              )}
+            </div>
             <div className="flex-1 min-w-0">
               <span className="text-sm text-gray-700 font-medium truncate">{user.username}</span>
-              <span className="text-xs text-gray-400 block">点击退出</span>
             </div>
-            <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-            </svg>
+            <div className="cursor-pointer hover:text-gray-600 transition-colors" onClick={onLogout} title="退出">
+              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+            </div>
           </div>
         </div>
       </div>
