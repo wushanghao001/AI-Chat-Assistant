@@ -11,6 +11,8 @@ interface Conversation {
   title: string;
   timestamp: number;
   model: ModelId;
+  pinned?: boolean;
+  customTitle?: boolean;
 }
 
 interface ChatInterfaceProps {
@@ -21,13 +23,30 @@ interface ChatInterfaceProps {
 export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string>('');
-  const [messages, setMessages] = useState<Message[]>([]);
+  // 使用 Map 存储多个会话的消息
+  const [messagesMap, setMessagesMap] = useState<Map<string, Message[]>>(new Map());
+  // 使用 Map 存储每个会话的加载状态
+  const [loadingMap, setLoadingMap] = useState<Map<string, boolean>>(new Map());
+  
+  // 获取当前会话的消息
+  const messages = messagesMap.get(currentConversationId) || [];
+  // 获取当前会话的加载状态
+  const isLoading = loadingMap.get(currentConversationId) || false;
   const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<ModelId>('glm-4');
   const [showModelDropdown, setShowModelDropdown] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{
+    visible: boolean;
+    x: number;
+    y: number;
+    conversationId: string;
+  }>({ visible: false, x: 0, y: 0, conversationId: '' });
+  const [renameInput, setRenameInput] = useState('');
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isPausedRef = useRef<boolean>(false);
@@ -49,18 +68,25 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
     isPausedRef.current = isPaused;
   }, [isPaused]);
 
-  // 加载当前对话的消息（只在首次选择对话时加载）
+  // 加载所有会话的消息到 Map 中
   useEffect(() => {
     if (currentConversationId) {
-      const savedMessages = localStorage.getItem(`messages_${currentConversationId}`);
-      if (savedMessages) {
-        try {
-          const parsedMessages = JSON.parse(savedMessages);
-          // 只有当当前消息列表为空时才加载保存的消息
-          // 避免覆盖刚添加的用户消息
-          setMessages(prev => prev.length === 0 ? parsedMessages : prev);
-        } catch (e) {
-          console.error('Failed to load messages:', e);
+      // 检查 Map 中是否已有该会话的消息
+      if (messagesMap.has(currentConversationId)) {
+        // Map 中已有，直接使用
+      } else {
+        // 从 localStorage 加载
+        const savedMessages = localStorage.getItem(`messages_${currentConversationId}`);
+        if (savedMessages) {
+          try {
+            const parsedMessages = JSON.parse(savedMessages);
+            setMessagesMap(prev => new Map(prev).set(currentConversationId, parsedMessages));
+          } catch (e) {
+            console.error('Failed to load messages:', e);
+          }
+        } else {
+          // 如果没有保存的消息，初始化为空数组
+          setMessagesMap(prev => new Map(prev).set(currentConversationId, []));
         }
       }
       // 加载对话使用的模型
@@ -78,12 +104,14 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
     }
   }, [conversations]);
 
-  // 保存当前对话的消息
+  // 保存消息到 localStorage
   useEffect(() => {
-    if (currentConversationId && messages.length > 0) {
-      localStorage.setItem(`messages_${currentConversationId}`, JSON.stringify(messages));
-    }
-  }, [currentConversationId, messages]);
+    messagesMap.forEach((msgs, id) => {
+      if (msgs.length > 0) {
+        localStorage.setItem(`messages_${id}`, JSON.stringify(msgs));
+      }
+    });
+  }, [messagesMap]);
 
   // 滚动到底部
   useEffect(() => {
@@ -91,7 +119,7 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
   }, [messages]);
 
   // 创建新对话
-  const createNewConversation = (): string => {
+  const createNewConversation = (clearMessages: boolean = true): string => {
     const newId = Date.now().toString();
     const newConversation: Conversation = {
       id: newId,
@@ -101,7 +129,10 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
     };
     setConversations(prev => [newConversation, ...prev]);
     setCurrentConversationId(newId);
-    // 不在这里清空消息列表，让调用者处理
+    // 点击新建对话按钮时初始化空消息列表
+    if (clearMessages) {
+      setMessagesMap(prev => new Map(prev).set(newId, []));
+    }
     setError(null);
     return newId;
   };
@@ -113,16 +144,58 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
   };
 
   // 删除对话
-  const deleteConversation = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const deleteConversation = (id: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
     if (confirm('确定要删除这个对话吗？')) {
       setConversations(prev => prev.filter(c => c.id !== id));
       localStorage.removeItem(`messages_${id}`);
+      setMessagesMap(prev => {
+        const newMap = new Map(prev);
+        newMap.delete(id);
+        return newMap;
+      });
       if (currentConversationId === id) {
         setCurrentConversationId('');
-        setMessages([]);
       }
     }
+    setContextMenu({ visible: false, x: 0, y: 0, conversationId: '' });
+  };
+
+  // 置顶对话
+  const pinConversation = (id: string) => {
+    setConversations(prev =>
+      prev.map(c => (c.id === id ? { ...c, pinned: true } : c))
+    );
+    setContextMenu({ visible: false, x: 0, y: 0, conversationId: '' });
+  };
+
+  // 取消置顶
+  const unpinConversation = (id: string) => {
+    setConversations(prev =>
+      prev.map(c => (c.id === id ? { ...c, pinned: false } : c))
+    );
+    setContextMenu({ visible: false, x: 0, y: 0, conversationId: '' });
+  };
+
+  // 开始重命名
+  const startRename = (id: string) => {
+    const conversation = conversations.find(c => c.id === id);
+    if (conversation) {
+      setRenameInput(conversation.title);
+      setRenamingId(id);
+    }
+    setContextMenu({ visible: false, x: 0, y: 0, conversationId: '' });
+  };
+
+  // 完成重命名
+  const finishRename = (id: string) => {
+    if (renameInput.trim()) {
+      setConversations(prev =>
+        prev.map(c => (c.id === id ? { ...c, title: renameInput.trim(), customTitle: true } : c))
+      );
+    }
+    setRenamingId(null);
+    setRenameInput('');
   };
 
   // 清空所有对话
@@ -131,7 +204,7 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
       // 清空所有对话
       setConversations([]);
       setCurrentConversationId('');
-      setMessages([]);
+      setMessagesMap(new Map());
       setError(null);
       
       // 从 LocalStorage 中删除所有对话相关的存储
@@ -158,7 +231,7 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
     // 如果没有当前对话，创建一个新对话并获取新ID
     let conversationId = currentConversationId;
     if (!conversationId) {
-      conversationId = createNewConversation();
+      conversationId = createNewConversation(false);
     }
 
     const userMessage: Message = {
@@ -169,10 +242,16 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
 
     // 1. 用户输入消息后，添加到消息列表
     if (!messageContent) { // 只有当不是修改后重新发送时才添加新消息
-      setMessages(prev => [...prev, userMessage]);
+      setMessagesMap(prev => {
+        const newMap = new Map(prev);
+        const currentMessages = newMap.get(conversationId) || [];
+        newMap.set(conversationId, [...currentMessages, userMessage]);
+        return newMap;
+      });
       setInput('');
     }
-    setIsLoading(true);
+    // 设置当前会话为加载状态
+    setLoadingMap(prev => new Map(prev).set(conversationId, true));
     setIsPaused(false);
     setError(null);
 
@@ -181,11 +260,14 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
       const currentDate = new Date();
       const dateString = `${currentDate.getFullYear()}年${currentDate.getMonth() + 1}月${currentDate.getDate()}日`;
       
+      // 获取当前会话的消息用于构建历史
+      const currentMessages = messagesMap.get(conversationId) || [];
+      
       // 2. 构建消息历史（包含历史消息，实现多轮对话）
       let messageHistory;
       if (messageContent) {
         // 如果是修改后重新发送，使用修改后的消息替换原来的消息
-        messageHistory = messages.slice(0, -1).map(msg => ({
+        messageHistory = currentMessages.slice(0, -1).map(msg => ({
           role: msg.role,
           content: msg.content,
         })).concat([{
@@ -194,7 +276,7 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
         }]);
       } else {
         // 如果是新消息，直接添加到历史记录
-        messageHistory = messages.map(msg => ({
+        messageHistory = currentMessages.map(msg => ({
           role: msg.role,
           content: msg.content,
         })).concat([{
@@ -218,13 +300,22 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
         timestamp: Date.now(),
       };
 
-      setMessages(prev => [...prev, assistantMessage]);
+      // 添加助手消息占位符到对应会话
+      setMessagesMap(prev => {
+        const newMap = new Map(prev);
+        const currentMessages = newMap.get(conversationId) || [];
+        newMap.set(conversationId, [...currentMessages, assistantMessage]);
+        return newMap;
+      });
 
       // 3. 调用 API 获取 AI 回答，使用流式输出
       
       // 创建 AbortController 用于中止请求
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
+      
+      // 保存发送消息时的会话ID，用于在流式回调中更新对应会话的消息
+      const sendingConversationId = conversationId;
       
       try {
         // 尝试使用流式输出
@@ -241,7 +332,12 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
               console.error('API 调用失败:', chunk.msg || '未知错误');
               setError(chunk.msg || '发送消息失败，请重试');
               // 移除正在加载的助手消息
-              setMessages(prev => prev.slice(0, -1));
+              setMessagesMap(prev => {
+                const newMap = new Map(prev);
+                const currentMessages = newMap.get(sendingConversationId) || [];
+                newMap.set(sendingConversationId, currentMessages.slice(0, -1));
+                return newMap;
+              });
               return;
             }
             
@@ -270,9 +366,11 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
             console.log('最终delta:', delta);
             
             if (delta) {
-              // 4. 逐字显示 AI 的回答
-              setMessages(prev => {
-                const newMessages = [...prev];
+              // 4. 逐字显示 AI 的回答，更新发送消息时的会话
+              setMessagesMap(prev => {
+                const newMap = new Map(prev);
+                const currentMessages = newMap.get(sendingConversationId) || [];
+                const newMessages = [...currentMessages];
                 let lastIndex = newMessages.length - 1;
                 let lastMessage = newMessages[lastIndex];
                 
@@ -294,7 +392,8 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
                   content: lastMessage.content + delta
                 };
                 newMessages[lastIndex] = updatedMessage;
-                return newMessages;
+                newMap.set(sendingConversationId, newMessages);
+                return newMap;
               });
             }
           },
@@ -308,28 +407,49 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
           const errorMessage = e instanceof Error ? e.message : '发送消息失败，请重试';
           setError(`API 调用失败: ${errorMessage}\n\n可能的原因：\n1. API Key 无效或已过期\n2. 网络连接问题\n3. 智谱 AI 服务暂时不可用\n\n请检查 API Key 是否正确，或者稍后再试。`);
           // 移除正在加载的助手消息
-          setMessages(prev => prev.slice(0, -1));
+          setMessagesMap(prev => {
+            const newMap = new Map(prev);
+            const currentMessages = newMap.get(sendingConversationId) || [];
+            newMap.set(sendingConversationId, currentMessages.slice(0, -1));
+            return newMap;
+          });
         }
       }
 
-      // 更新对话标题（如果是第一条消息）
+      // 更新对话标题（如果是第一条消息且用户没有自定义标题）
       if (messages.length === 0) {
-        const contentStr = String(userMessage.content);
         setConversations(prev =>
-          prev.map(c =>
-            c.id === conversationId
-              ? { ...c, title: contentStr.slice(0, 20) + (contentStr.length > 20 ? '...' : ''), model: selectedModel }
-              : c
-          )
+          prev.map(c => {
+            if (c.id === conversationId) {
+              // 只有当用户没有自定义标题时才自动更新标题
+              if (!c.customTitle) {
+                const contentStr = String(userMessage.content);
+                return { 
+                  ...c, 
+                  title: contentStr.slice(0, 20) + (contentStr.length > 20 ? '...' : ''), 
+                  model: selectedModel 
+                };
+              }
+              // 用户已自定义标题，只更新模型
+              return { ...c, model: selectedModel };
+            }
+            return c;
+          })
         );
       }
     } catch (e) {
       console.error('发送消息失败:', e);
       setError(e instanceof Error ? e.message : '发送消息失败，请重试');
       // 移除正在加载的助手消息
-      setMessages(prev => prev.slice(0, -1));
+      setMessagesMap(prev => {
+        const newMap = new Map(prev);
+        const currentMessages = newMap.get(conversationId) || [];
+        newMap.set(conversationId, currentMessages.slice(0, -1));
+        return newMap;
+      });
     } finally {
-      setIsLoading(false);
+      // 清除发送消息会话的加载状态
+      setLoadingMap(prev => new Map(prev).set(conversationId, false));
       abortControllerRef.current = null;
     }
   };
@@ -341,7 +461,10 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
       abortControllerRef.current = null;
     }
     setIsPaused(true);
-    setIsLoading(false);
+    // 清除当前会话的加载状态
+    if (currentConversationId) {
+      setLoadingMap(prev => new Map(prev).set(currentConversationId, false));
+    }
   };
 
   // 开始修改消息
@@ -351,25 +474,28 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
     }
     setInput(message.content);
     // 移除消息和对应的助手回复
-    setMessages(prev => {
-      const index = prev.indexOf(message);
+    setMessagesMap(prev => {
+      const newMap = new Map(prev);
+      const currentMessages = newMap.get(currentConversationId) || [];
+      const index = currentMessages.indexOf(message);
       if (index !== -1) {
         // 如果消息后面有助手回复，也一起移除
-        const newMessages = [...prev];
+        const newMessages = [...currentMessages];
         if (index + 1 < newMessages.length && newMessages[index + 1].role === 'assistant') {
           newMessages.splice(index, 2);
         } else {
           newMessages.splice(index, 1);
         }
-        return newMessages;
+        newMap.set(currentConversationId, newMessages);
       }
-      return prev;
+      return newMap;
     });
   };
 
   // 分组对话
   const groupedConversations = () => {
     const groups: { [key: string]: Conversation[] } = {
+      '置顶': [],
       '今天': [],
       '昨天': [],
       '过去7天': [],
@@ -377,6 +503,12 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
     };
 
     conversations.forEach(conv => {
+      // 置顶的会话放在置顶分组
+      if (conv.pinned) {
+        groups['置顶'].push(conv);
+        return;
+      }
+
       const now = Date.now();
       const diff = now - conv.timestamp;
       const days = Math.floor(diff / (1000 * 60 * 60 * 24));
@@ -401,31 +533,60 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
   return (
     <div className="flex h-screen bg-white overflow-hidden">
       {/* 左侧边栏 */}
-      <div className="w-64 bg-gray-50 border-r border-gray-200 flex flex-col flex-shrink-0">
-        {/* 新建对话和清空对话按钮 */}
-        <div className="p-4 space-y-3">
+      <div className={`${sidebarCollapsed ? 'w-10' : 'w-64'} bg-gray-50 border-r border-gray-200 flex flex-col flex-shrink-0 transition-all duration-200`}>
+        {/* 头部区域 */}
+        <div className={`${sidebarCollapsed ? 'flex justify-center pt-2' : 'flex items-center justify-between px-3 py-3 border-b border-gray-200'}`}>
+          {/* 展开时显示标题 */}
+          {!sidebarCollapsed && (
+            <span className="text-sm font-medium text-gray-700">会话列表</span>
+          )}
+          
+          {/* 折叠/展开按钮 */}
           <button
-            onClick={createNewConversation}
-            className="w-full flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm font-medium text-gray-700 shadow-sm"
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            className={`${sidebarCollapsed ? 'w-8 h-8' : 'w-8 h-8'} p-2 bg-white border border-gray-200 hover:bg-gray-50 hover:border-gray-300 rounded-lg shadow-sm transition-all flex-shrink-0 flex items-center justify-center`}
+            title={sidebarCollapsed ? '展开' : '收起'}
           >
-            <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            新建对话
-          </button>
-          <button
-            onClick={clearAllConversations}
-            className="w-full flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm font-medium text-gray-700 shadow-sm"
-          >
-            <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-            </svg>
-            清空对话
+            {sidebarCollapsed ? (
+              <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+              </svg>
+            ) : (
+              <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+              </svg>
+            )}
           </button>
         </div>
 
-        {/* 对话列表 */}
-        <div className="flex-1 overflow-y-auto px-3">
+        {/* 展开时显示的内容 */}
+        {!sidebarCollapsed && (
+          <>
+
+            {/* 新建对话和清空对话按钮 */}
+            <div className="p-4 space-y-3">
+              <button
+                onClick={() => createNewConversation()}
+                className="w-full flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm font-medium text-gray-700 shadow-sm"
+              >
+                <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                新建对话
+              </button>
+              <button
+                onClick={clearAllConversations}
+                className="w-full flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm font-medium text-gray-700 shadow-sm"
+              >
+                <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+                清空对话
+              </button>
+            </div>
+
+            {/* 对话列表 */}
+            <div className="flex-1 overflow-y-auto px-3">
           {Object.entries(groupedConversations()).map(([groupName, convs]) => (
             convs.length > 0 && (
               <div key={groupName} className="mb-4">
@@ -443,15 +604,47 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
                       }`}
                     >
                       <div className="flex-1 truncate">
-                        <span className="block truncate">{conv.title}</span>
-                        <span className="text-xs text-gray-400">{model?.name}</span>
+                        {renamingId === conv.id ? (
+                          <input
+                            type="text"
+                            value={renameInput}
+                            onChange={(e) => setRenameInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') finishRename(conv.id);
+                              if (e.key === 'Escape') setRenamingId(null);
+                            }}
+                            onBlur={() => finishRename(conv.id)}
+                            className={`w-full bg-transparent border-none outline-none text-sm truncate ${
+                              currentConversationId === conv.id ? 'text-gray-900' : 'text-gray-700'
+                            }`}
+                            autoFocus
+                          />
+                        ) : (
+                          <>
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate">{conv.title}</span>
+                              {conv.pinned && (
+                                <span className="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded flex-shrink-0">置顶</span>
+                              )}
+                            </div>
+                            <span className="text-xs text-gray-400">{model?.name}</span>
+                          </>
+                        )}
                       </div>
                       <button
-                        onClick={(e) => deleteConversation(conv.id, e)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setContextMenu({
+                            visible: true,
+                            x: e.clientX,
+                            y: e.clientY,
+                            conversationId: conv.id
+                          });
+                        }}
                         className="opacity-0 group-hover:opacity-100 p-1 hover:bg-gray-300 rounded transition-opacity"
                       >
                         <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
                         </svg>
                       </button>
                     </div>
@@ -460,33 +653,134 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
               </div>
             )
           ))}
-        </div>
+            </div>
 
-        {/* 底部用户信息 */}
-        <div className="p-4 border-t border-gray-200">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-gray-800 rounded-full flex items-center justify-center text-white text-sm font-medium">
-              {user.avatar ? (
-                <img
-                  src={user.avatar}
-                  alt={user.username}
-                  className="w-full h-full rounded-full object-cover"
-                />
-              ) : (
-                user.username.charAt(0)
-              )}
+            {/* 底部用户信息 */}
+            <div className="p-4 border-t border-gray-200">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 bg-gray-800 rounded-full flex items-center justify-center text-white text-sm font-medium">
+                  {user.avatar ? (
+                    <img
+                      src={user.avatar}
+                      alt={user.username}
+                      className="w-full h-full rounded-full object-cover"
+                    />
+                  ) : (
+                    user.username.charAt(0)
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <span className="text-sm text-gray-700 font-medium truncate">{user.username}</span>
+                </div>
+                <div className="cursor-pointer hover:text-gray-600 transition-colors" onClick={() => setShowLogoutConfirm(true)} title="退出">
+                  <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                  </svg>
+                </div>
+              </div>
             </div>
-            <div className="flex-1 min-w-0">
-              <span className="text-sm text-gray-700 font-medium truncate">{user.username}</span>
-            </div>
-            <div className="cursor-pointer hover:text-gray-600 transition-colors" onClick={onLogout} title="退出">
-              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-              </svg>
+          </>
+        )}
+      </div>
+
+      {/* 退出确认对话框 */}
+      {showLogoutConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+            <div className="p-6">
+              <div className="text-center mb-4">
+                <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-3">
+                  <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-medium text-gray-900">确认退出</h3>
+                <p className="text-sm text-gray-500 mt-2">
+                  退出登录不会丢失任何数据，你仍可以登录此账号。
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowLogoutConfirm(false)}
+                  className="flex-1 px-4 py-2.5 border border-gray-200 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => {
+                    setShowLogoutConfirm(false);
+                    onLogout();
+                  }}
+                  className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                >
+                  确认退出
+                </button>
+              </div>
             </div>
           </div>
         </div>
-      </div>
+      )}
+
+      {/* 上下文菜单 */}
+      {contextMenu.visible && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setContextMenu({ visible: false, x: 0, y: 0, conversationId: '' })}
+          />
+          <div
+            className="fixed bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50 min-w-[120px]"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            {(() => {
+              const conv = conversations.find(c => c.id === contextMenu.conversationId);
+              if (conv?.pinned) {
+                return (
+                  <button
+                    onClick={() => unpinConversation(contextMenu.conversationId)}
+                    className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    取消置顶
+                  </button>
+                );
+              }
+              return (
+                <button
+                  onClick={() => pinConversation(contextMenu.conversationId)}
+                  className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  置顶
+                </button>
+              );
+            })()}
+            <button
+              onClick={() => startRename(contextMenu.conversationId)}
+              className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+              重命名
+            </button>
+            <hr className="my-1 border-gray-200" />
+            <button
+              onClick={() => deleteConversation(contextMenu.conversationId)}
+              className="w-full px-4 py-2 text-left text-sm text-red-600 hover:bg-gray-50 flex items-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+              删除
+            </button>
+          </div>
+        </>
+      )}
 
       {/* 右侧主内容区 */}
       <div className="flex-1 flex flex-col min-w-0">
