@@ -975,7 +975,7 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
         {/* 底部输入区域 */}
         <div className="p-4 border-t border-gray-200 flex-shrink-0">
           <div className="max-w-3xl mx-auto">
-            <div className="flex items-end gap-3">
+            <div className="flex items-center gap-3">
               <div className="flex-1 relative">
                 <textarea
                   value={input}
