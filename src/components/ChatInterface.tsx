@@ -221,11 +221,8 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
   };
 
   // 发送消息
-  const handleSend = async (messageContent?: string | MouseEvent) => {
-    // 如果是 MouseEvent，忽略它
-    const content = (messageContent instanceof MouseEvent || typeof messageContent !== 'string') 
-      ? input.trim() 
-      : messageContent;
+  const handleSend = async () => {
+    const content = input.trim();
     if (!content || isLoading) return;
 
     // 如果没有当前对话，创建一个新对话并获取新ID
@@ -240,16 +237,6 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
       timestamp: Date.now(),
     };
 
-    // 1. 用户输入消息后，添加到消息列表
-    if (!messageContent) { // 只有当不是修改后重新发送时才添加新消息
-      setMessagesMap(prev => {
-        const newMap = new Map(prev);
-        const currentMessages = newMap.get(conversationId) || [];
-        newMap.set(conversationId, [...currentMessages, userMessage]);
-        return newMap;
-      });
-      setInput('');
-    }
     // 设置当前会话为加载状态
     setLoadingMap(prev => new Map(prev).set(conversationId, true));
     setIsPaused(false);
@@ -261,12 +248,17 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
       const dateString = `${currentDate.getFullYear()}年${currentDate.getMonth() + 1}月${currentDate.getDate()}日`;
       
       // 获取当前会话的消息用于构建历史
-      const currentMessages = messagesMap.get(conversationId) || [];
+      let currentMessages = messagesMap.get(conversationId) || [];
       
-      // 2. 构建消息历史（包含历史消息，实现多轮对话）
+      // 检查最后一条消息是否是助手消息（可能是暂停后留下的）
+      const lastMessage = currentMessages[currentMessages.length - 1];
+      const hasIncompleteAssistant = lastMessage && lastMessage.role === 'assistant';
+      
+      // 构建消息历史
       let messageHistory;
-      if (messageContent) {
-        // 如果是修改后重新发送，使用修改后的消息替换原来的消息
+      if (hasIncompleteAssistant) {
+        // 如果最后一条是助手消息，替换它（修改后重新发送的情况）
+        // 移除最后一条助手消息，使用修改后的用户消息
         messageHistory = currentMessages.slice(0, -1).map(msg => ({
           role: msg.role,
           content: msg.content,
@@ -275,7 +267,7 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
           content: userMessage.content,
         }]);
       } else {
-        // 如果是新消息，直接添加到历史记录
+        // 正常情况：添加新消息
         messageHistory = currentMessages.map(msg => ({
           role: msg.role,
           content: msg.content,
@@ -284,6 +276,22 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
           content: userMessage.content,
         }]);
       }
+      
+      // 先添加用户消息到消息列表
+      setMessagesMap(prev => {
+        const newMap = new Map(prev);
+        let currentMsgs = newMap.get(conversationId) || [];
+        if (hasIncompleteAssistant) {
+          // 移除不完整的助手消息，添加新的用户消息
+          currentMsgs = [...currentMsgs.slice(0, -1), userMessage];
+        } else {
+          // 添加新消息
+          currentMsgs = [...currentMsgs, userMessage];
+        }
+        newMap.set(conversationId, currentMsgs);
+        return newMap;
+      });
+      setInput('');
       
       // 在第一条用户消息前添加日期提示
       if (messageHistory.length > 0 && messageHistory[0].role === 'user') {
@@ -919,15 +927,6 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
                     AI
                   </div>
                   <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-sm font-medium text-gray-900">AI</span>
-                      <button
-                        onClick={handlePause}
-                        className="text-xs text-red-500 hover:text-red-700 transition-colors px-2 py-0.5 bg-red-50 rounded"
-                      >
-                        暂停思考
-                      </button>
-                    </div>
                     <div className="flex items-center gap-2 text-gray-500 text-sm">
                       <span>思考中</span>
                       <span className="flex gap-1">
@@ -975,6 +974,29 @@ export function ChatInterface({ user, onLogout }: ChatInterfaceProps) {
         {/* 底部输入区域 */}
         <div className="p-4 border-t border-gray-200 flex-shrink-0">
           <div className="max-w-3xl mx-auto">
+            {/* 暂停思考按钮（固定在输入框上方） */}
+            {isLoading && (
+              <div className="flex items-center justify-between mb-3 px-1">
+                <div className="flex items-center gap-2 text-sm text-gray-500">
+                  <span className="flex gap-1">
+                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
+                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
+                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
+                  </span>
+                  <span>AI 正在思考...</span>
+                </div>
+                <button
+                  onClick={handlePause}
+                  className="text-sm text-red-500 hover:text-red-700 transition-colors px-3 py-1 bg-red-50 rounded-lg flex items-center gap-1.5"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  暂停思考
+                </button>
+              </div>
+            )}
+            
             <div className="flex items-center gap-3">
               <div className="flex-1 relative">
                 <textarea

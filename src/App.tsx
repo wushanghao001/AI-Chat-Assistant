@@ -33,11 +33,8 @@ function App() {
   };
 
   const handleRegister = () => {
-    const currentUser = getCurrentUser();
-    if (currentUser) {
-      setUser(currentUser);
-      setIsAuthenticated(true);
-    }
+    // 注册成功后跳转到登录界面，让用户手动登录
+    setAuthMode('login');
   };
 
   const handleLogout = () => {

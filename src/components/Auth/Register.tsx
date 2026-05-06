@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { RegisterData } from '../../types/user';
 import { register } from '../../services/auth';
 
@@ -15,6 +15,19 @@ export function Register({ onRegister, onSwitchToLogin }: RegisterProps) {
   });
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isSuccess, setIsSuccess] = useState(false);
+  const [countdown, setCountdown] = useState(3);
+
+  useEffect(() => {
+    if (isSuccess && countdown > 0) {
+      const timer = setTimeout(() => {
+        setCountdown(countdown - 1);
+      }, 1000);
+      return () => clearTimeout(timer);
+    } else if (isSuccess && countdown === 0) {
+      onRegister();
+    }
+  }, [isSuccess, countdown, onRegister]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -23,7 +36,7 @@ export function Register({ onRegister, onSwitchToLogin }: RegisterProps) {
 
     try {
       await register(formData);
-      onRegister();
+      setIsSuccess(true);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -38,6 +51,36 @@ export function Register({ onRegister, onSwitchToLogin }: RegisterProps) {
     }));
   };
 
+  // 注册成功界面
+  if (isSuccess) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+        <div className="w-full max-w-md">
+          <div className="bg-white rounded-2xl shadow-xl p-8 text-center">
+            <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
+              <svg className="w-10 h-10 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            <h1 className="text-2xl font-bold text-gray-800 mb-2">注册成功！</h1>
+            <p className="text-gray-500 mb-6">
+              <span className="inline-flex items-center">
+                将在 <span className="text-indigo-600 font-bold text-xl mx-1">{countdown}</span> 秒后自动跳转到登录页面
+              </span>
+            </p>
+            <button
+              onClick={onRegister}
+              className="text-blue-600 hover:text-blue-700 font-medium"
+            >
+              立即跳转
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 注册表单界面
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
